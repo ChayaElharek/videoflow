@@ -1,8 +1,7 @@
 import { NextResponse } from 'next/server';
-import { getSession } from '@/lib/session';
 
 export async function POST() {
-  const session = await getSession();
-  session.destroy();
-  return NextResponse.json({ ok: true });
+  const res = NextResponse.json({ ok: true });
+  res.cookies.set('auth', '', { maxAge: 0, path: '/' });
+  return res;
 }

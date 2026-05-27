@@ -3,7 +3,6 @@ import { NextRequest, NextResponse } from 'next/server';
 export function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
-  // Rotas públicas — não precisa de login
   if (
     pathname.startsWith('/login') ||
     pathname.startsWith('/embed') ||
@@ -16,9 +15,8 @@ export function middleware(req: NextRequest) {
     return NextResponse.next();
   }
 
-  // Verifica cookie de sessão
-  const session = req.cookies.get('videoflow_session');
-  if (!session) {
+  const auth = req.cookies.get('auth');
+  if (!auth || auth.value !== 'logged') {
     return NextResponse.redirect(new URL('/login', req.url));
   }
 
