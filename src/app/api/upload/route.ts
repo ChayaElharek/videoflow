@@ -84,10 +84,13 @@ async function createBunnyVideo(title: string): Promise<string> {
   console.log('Bunny createVideo response:', JSON.stringify(data));
   return data.guid;
 }
-
 async function uploadToBunny(videoId: string, filePath: string): Promise<void> {
   const fs = await import('fs');
-  const fileBuffer = fs.readFileSync(filePath);
+  const { stat } = await import('fs/promises');
+
+  const fileStats = await stat(filePath);
+  const fileSize = fileStats.size;
+  const fileStream = fs.createReadStream(filePath);
 
   const res = await fetch(
     `https://video.bunnycdn.com/library/${process.env.BUNNY_LIBRARY_ID}/videos/${videoId}`,
@@ -96,8 +99,11 @@ async function uploadToBunny(videoId: string, filePath: string): Promise<void> {
       headers: {
         'AccessKey': process.env.BUNNY_API_KEY!,
         'Content-Type': 'application/octet-stream',
+        'Content-Length': fileSize.toString(),
       },
-      body: fileBuffer,
+      body: fileStream as any,
+      // @ts-ignore
+      duplex: 'half',
     }
   );
   console.log('Bunny upload status:', res.status);
