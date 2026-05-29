@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { writeFile, mkdir } from 'fs/promises';
+import { writeFile, mkdir, rm } from 'fs/promises';
 import path from 'path';
 import { randomUUID } from 'crypto';
 import ffmpeg from 'fluent-ffmpeg';
@@ -14,99 +14,113 @@ export async function POST(req: NextRequest) {
   if (!file) return NextResponse.json({ error: 'Nenhum arquivo' }, { status: 400 });
 
   const id = randomUUID();
-  const videoDir = path.join(process.cwd(), 'public', 'videos', id);
-  await mkdir(videoDir, { recursive: true });
+  const tmpDir = path.join(process.cwd(), 'tmp', id);
+  await mkdir(tmpDir, { recursive: true });
 
   const buffer = Buffer.from(await file.arrayBuffer());
-  const inputPath = path.join(videoDir, 'input.mp4');
+  const inputPath = path.join(tmpDir, 'input.mp4');
   await writeFile(inputPath, buffer);
 
- insert({
-  id,
-  title: title || file.name,
-  status: 'processing',
-  hls_path: null,
-  duration: null,
-  created_at: new Date().toISOString(),
-  allowed_domains: allowedDomains || undefined,
+  insert({
+    id,
+    title: title || file.name,
+    status: 'processing',
+    hls_path: null,
+    duration: null,
+    created_at: new Date().toISOString(),
+    allowed_domains: allowedDomains || undefined,
   });
 
-  convertToHLS(id, inputPath, videoDir);
+  processVideo(id, inputPath, tmpDir);
 
   return NextResponse.json({ id });
 }
 
-function getQualities(height: number) {
-  const all = [
-    { name: '360p', scale: '640:360', bitrate: '800k', audioBitrate: '96k' },
-    { name: '720p', scale: '1280:720', bitrate: '2500k', audioBitrate: '128k' },
-    { name: '1080p', scale: '1920:1080', bitrate: '5000k', audioBitrate: '192k' },
-  ];
-  return all.filter(q => parseInt(q.name) <= height);
+async function processVideo(id: string, inputPath: string, tmpDir: string) {
+  try {
+    const metadata = await getMetadata(inputPath);
+    const bunnyVideoId = await createBunnyVideo(id);
+    await uploadToBunny(bunnyVideoId, inputPath);
+    const hlsUrl = await waitBunnyReady(bunnyVideoId);
+    update(id, {
+      status: 'ready',
+      hls_path: hlsUrl,
+      duration: metadata.duration,
+      bunny_video_id: bunnyVideoId,
+    });
+  } catch (err) {
+    console.error('Erro no processamento:', err);
+    update(id, { status: 'error' });
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
 }
 
-function convertToHLS(id: string, inputPath: string, outputDir: string) {
-  // Primeiro pega a resolução original
-  ffmpeg.ffprobe(inputPath, (err, data) => {
-    if (err) {
-      update(id, { status: 'error' });
-      return;
-    }
-
-    const videoStream = data.streams.find(s => s.codec_type === 'video');
-    const height = videoStream?.height || 720;
-    const duration = data.format.duration || null;
-    const qualities = getQualities(height);
-
-    // Gera cada qualidade
-    let completed = 0;
-    const masterLines = ['#EXTM3U', '#EXT-X-VERSION:3'];
-
-    qualities.forEach(q => {
-      const qualityDir = path.join(outputDir, q.name);
-      require('fs').mkdirSync(qualityDir, { recursive: true });
-
-      ffmpeg(inputPath)
-        .videoCodec('libx264')
-        .audioCodec('aac')
-        .videoBitrate(q.bitrate)
-        .audioBitrate(q.audioBitrate)
-        .outputOptions([
-          `-vf scale=${q.scale}`,
-          '-hls_time 10',
-          '-hls_list_size 0',
-          '-hls_segment_filename', path.join(qualityDir, 'seg%03d.ts'),
-          '-f hls',
-          '-preset fast',
-          '-movflags +faststart',
-        ])
-        .output(path.join(qualityDir, 'index.m3u8'))
-        .on('end', () => {
-          const bandwidth = parseInt(q.bitrate) * 1000;
-          masterLines.push(
-            `#EXT-X-STREAM-INF:BANDWIDTH=${bandwidth},RESOLUTION=${q.scale.replace(':', 'x')},NAME="${q.name}"`,
-            `${q.name}/index.m3u8`
-          );
-
-          completed++;
-          if (completed === qualities.length) {
-            // Escreve o master.m3u8
-            require('fs').writeFileSync(
-              path.join(outputDir, 'master.m3u8'),
-              masterLines.join('\n')
-            );
-            update(id, {
-              status: 'ready',
-              hls_path: `/videos/${id}/master.m3u8`,
-              duration,
-            });
-          }
-        })
-        .on('error', (err) => {
-          console.error(`Erro na qualidade ${q.name}:`, err.message);
-          update(id, { status: 'error' });
-        })
-        .run();
+function getMetadata(filePath: string): Promise<{ duration: number }> {
+  return new Promise((resolve, reject) => {
+    ffmpeg.ffprobe(filePath, (err, data) => {
+      if (err) return reject(err);
+      resolve({ duration: data.format.duration || 0 });
     });
   });
+}
+
+async function createBunnyVideo(title: string): Promise<string> {
+  console.log('BUNNY_LIBRARY_ID:', process.env.BUNNY_LIBRARY_ID);
+  console.log('BUNNY_API_KEY:', process.env.BUNNY_API_KEY);
+
+  const res = await fetch(
+    `https://video.bunnycdn.com/library/${process.env.BUNNY_LIBRARY_ID}/videos`,
+    {
+      method: 'POST',
+      headers: {
+        'AccessKey': process.env.BUNNY_API_KEY!,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ title }),
+    }
+  );
+  const data = await res.json();
+  console.log('Bunny createVideo response:', JSON.stringify(data));
+  return data.guid;
+}
+
+async function uploadToBunny(videoId: string, filePath: string): Promise<void> {
+  const fs = await import('fs');
+  const fileBuffer = fs.readFileSync(filePath);
+
+  const res = await fetch(
+    `https://video.bunnycdn.com/library/${process.env.BUNNY_LIBRARY_ID}/videos/${videoId}`,
+    {
+      method: 'PUT',
+      headers: {
+        'AccessKey': process.env.BUNNY_API_KEY!,
+        'Content-Type': 'application/octet-stream',
+      },
+      body: fileBuffer,
+    }
+  );
+  console.log('Bunny upload status:', res.status);
+}
+
+async function waitBunnyReady(videoId: string): Promise<string> {
+  const maxAttempts = 60;
+
+  for (let i = 0; i < maxAttempts; i++) {
+    await new Promise(r => setTimeout(r, 5000));
+
+    const res = await fetch(
+      `https://video.bunnycdn.com/library/${process.env.BUNNY_LIBRARY_ID}/videos/${videoId}`,
+      { headers: { 'AccessKey': process.env.BUNNY_API_KEY! } }
+    );
+    const data = await res.json();
+    console.log(`Bunny status [${i}]:`, data.status);
+
+    if (data.status === 4) {
+      return `https://${process.env.BUNNY_CDN_HOSTNAME}/${videoId}/playlist.m3u8`;
+    }
+    if (data.status === 5) throw new Error('Bunny: erro no processamento');
+  }
+
+  throw new Error('Bunny: timeout');
 }

@@ -12,7 +12,16 @@ export interface VideoRecord {
   created_at: string;
   allowed_domains?: string; // domínios separados por vírgula
 }
-
+export interface VideoRecord {
+  id: string;
+  title: string;
+  status: 'processing' | 'ready' | 'error';
+  hls_path: string | null;
+  duration: number | null;
+  created_at: string;
+  allowed_domains?: string;
+  bunny_video_id?: string;
+}
 export function getAll(): VideoRecord[] {
   if (!existsSync(DB_PATH)) return [];
   return JSON.parse(readFileSync(DB_PATH, 'utf-8'));
