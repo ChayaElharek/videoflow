@@ -5,6 +5,9 @@ import { randomUUID } from 'crypto';
 import ffmpeg from 'fluent-ffmpeg';
 import { insert, update } from '@/lib/videos';
 
+export const maxDuration = 300;
+export const dynamic = 'force-dynamic';
+
 export async function POST(req: NextRequest) {
   const formData = await req.formData();
   const file = formData.get('video') as File;
@@ -32,7 +35,6 @@ export async function POST(req: NextRequest) {
   });
 
   processVideo(id, inputPath, tmpDir);
-
   return NextResponse.json({ id });
 }
 
@@ -84,6 +86,7 @@ async function createBunnyVideo(title: string): Promise<string> {
   console.log('Bunny createVideo response:', JSON.stringify(data));
   return data.guid;
 }
+
 async function uploadToBunny(videoId: string, filePath: string): Promise<void> {
   const fs = await import('fs');
   const { stat } = await import('fs/promises');
